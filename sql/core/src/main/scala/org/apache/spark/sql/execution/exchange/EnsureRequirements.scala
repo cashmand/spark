@@ -20,11 +20,15 @@ package org.apache.spark.sql.execution.exchange
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution._
+import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 import org.apache.spark.sql.execution.joins.{ShuffledHashJoinExec, SortMergeJoinExec}
+import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.util.collection.Utils
 
 /**
  * Ensures that the [[org.apache.spark.sql.catalyst.plans.physical.Partitioning Partitioning]]
@@ -72,9 +76,17 @@ case class EnsureRequirements(
       case _ => false
     }.map(_._2)
 
+    // Special case: if all sides of the join are single partition and it's physical size less than
+    // or equal spark.sql.maxSinglePartitionBytes.
+    val preferSinglePartition = childrenIndexes.forall { i =>
+      children(i).outputPartitioning == SinglePartition &&
+        children(i).logicalLink
+          .forall(_.stats.sizeInBytes <= conf.getConf(SQLConf.MAX_SINGLE_PARTITION_BYTES))
+    }
+
     // If there are more than one children, we'll need to check partitioning & distribution of them
     // and see if extra shuffles are necessary.
-    if (childrenIndexes.length > 1) {
+    if (childrenIndexes.length > 1 && !preferSinglePartition) {
       val specs = childrenIndexes.map(i => {
         val requiredDist = requiredChildDistributions(i)
         assert(requiredDist.isInstanceOf[ClusteredDistribution],
@@ -137,8 +149,82 @@ case class EnsureRequirements(
         Some(finalCandidateSpecs.values.maxBy(_.numPartitions))
       }
 
+      // Retrieve the non-collection spec from the input
+      def getRootSpec(spec: ShuffleSpec): ShuffleSpec = spec match {
+        case ShuffleSpecCollection(specs) => getRootSpec(specs.head)
+        case spec => spec
+      }
+
+      // Populate the common partition values down to the scan nodes
+      def populatePartitionValues(plan: SparkPlan, values: Seq[InternalRow]): SparkPlan =
+        plan match {
+          case scan: BatchScanExec =>
+            scan.copy(commonPartitionValues = Some(values))
+          case node =>
+            node.mapChildren(child => populatePartitionValues(child, values))
+        }
+
+      // Check if the following conditions are satisfied:
+      //   1. There are exactly two children (e.g., join). Note that Spark doesn't support
+      //      multi-way join at the moment, so this check should be sufficient.
+      //   2. All children are of `KeyGroupedPartitioning`, and they are compatible with each other
+      // If both are true, skip shuffle.
+      val allCompatible = childrenIndexes.length == 2 && {
+        val left = childrenIndexes.head
+        val right = childrenIndexes(1)
+        var isCompatible: Boolean = false
+
+        if (checkKeyGroupedSpec(specs(left)) && checkKeyGroupedSpec(specs(right))) {
+          isCompatible = specs(left).isCompatibleWith(specs(right))
+
+          // If `isCompatible` is false, it could mean:
+          //   1. Partition keys (expressions) are not compatible: we have to shuffle in this case.
+          //   2. Partition keys (expressions) are compatible, but partition values are not: in this
+          //      case we can compute a superset of partition values and push-down to respective
+          //      data sources, which can then adjust their respective output partitioning by
+          //      filling missing partition values with empty partitions. As result, Spark can still
+          //      avoid shuffle.
+          //
+          // For instance, if two sides of a join have partition expressions `day(a)` and `day(b)`
+          // respectively (the join query could be `SELECT ... FROM t1 JOIN t2 on t1.a = t2.b`),
+          // but with different partition values:
+          //   `day(a)`: [0, 1]
+          //   `day(b)`: [1, 2, 3]
+          // Following the case 2 above, we don't have to shuffle both sides, but instead can just
+          // push the common set of partition values: `[0, 1, 2, 3]` down to the two data sources.
+          if (!isCompatible && conf.v2BucketingPushPartValuesEnabled) {
+            (getRootSpec(specs(left)), getRootSpec(specs(right))) match {
+              case (leftSpec: KeyGroupedShuffleSpec, rightSpec: KeyGroupedShuffleSpec) =>
+                // Check if the two children are partition keys compatible. If so, find the
+                // common set of partition values, and adjust the plan accordingly.
+                if (leftSpec.areKeysCompatible(rightSpec)) {
+                  val leftPartValues = leftSpec.partitioning.partitionValues
+                  val rightPartValues = rightSpec.partitioning.partitionValues
+
+                  val mergedPartValues = Utils.mergeOrdered(
+                    Seq(leftPartValues, rightPartValues))(leftSpec.ordering).toSeq.distinct
+
+                  // Now we need to push-down the common partition key to the scan in each child
+                  children = children.zipWithIndex.map {
+                    case (child, idx) if childrenIndexes.contains(idx) =>
+                      populatePartitionValues(child, mergedPartValues)
+                    case (child, _) => child
+                  }
+
+                  isCompatible = true
+                }
+              case _ =>
+                // This case shouldn't happen since `checkKeyGroupedSpec` should've made
+                // sure that we only have `KeyGroupedShuffleSpec`
+            }
+          }
+        }
+
+        isCompatible
+      }
+
       children = children.zip(requiredChildDistributions).zipWithIndex.map {
-        case ((child, _), idx) if !childrenIndexes.contains(idx) =>
+        case ((child, _), idx) if allCompatible || !childrenIndexes.contains(idx) =>
           child
         case ((child, dist), idx) =>
           if (bestSpecOpt.isDefined && bestSpecOpt.get.isCompatibleWith(specs(idx))) {
@@ -175,6 +261,26 @@ case class EnsureRequirements(
     }
 
     children
+  }
+
+  private def checkKeyGroupedSpec(shuffleSpec: ShuffleSpec): Boolean = {
+    def check(spec: KeyGroupedShuffleSpec): Boolean = {
+      val attributes = spec.partitioning.expressions.flatMap(_.collectLeaves())
+      val clustering = spec.distribution.clustering
+
+      if (SQLConf.get.getConf(SQLConf.REQUIRE_ALL_CLUSTER_KEYS_FOR_CO_PARTITION)) {
+        attributes.length == clustering.length && attributes.zip(clustering).forall {
+          case (l, r) => l.semanticEquals(r)
+        }
+      } else {
+        true // already validated in `KeyGroupedPartitioning.satisfies`
+      }
+    }
+    shuffleSpec match {
+      case spec: KeyGroupedShuffleSpec => check(spec)
+      case ShuffleSpecCollection(specs) => specs.exists(checkKeyGroupedSpec)
+      case _ => false
+    }
   }
 
   private def reorder(
@@ -256,6 +362,16 @@ case class EnsureRequirements(
         reorder(leftKeys.toIndexedSeq, rightKeys.toIndexedSeq, rightExpressions, rightKeys)
           .orElse(reorderJoinKeysRecursively(
             leftKeys, rightKeys, leftPartitioning, None))
+      case (Some(KeyGroupedPartitioning(clustering, _, _)), _) =>
+        val leafExprs = clustering.flatMap(_.collectLeaves())
+        reorder(leftKeys.toIndexedSeq, rightKeys.toIndexedSeq, leafExprs, leftKeys)
+            .orElse(reorderJoinKeysRecursively(
+              leftKeys, rightKeys, None, rightPartitioning))
+      case (_, Some(KeyGroupedPartitioning(clustering, _, _))) =>
+        val leafExprs = clustering.flatMap(_.collectLeaves())
+        reorder(leftKeys.toIndexedSeq, rightKeys.toIndexedSeq, leafExprs, rightKeys)
+            .orElse(reorderJoinKeysRecursively(
+              leftKeys, rightKeys, leftPartitioning, None))
       case (Some(PartitioningCollection(partitionings)), _) =>
         partitionings.foldLeft(Option.empty[(Seq[Expression], Seq[Expression])]) { (res, p) =>
           res.orElse(reorderJoinKeysRecursively(leftKeys, rightKeys, Some(p), rightPartitioning))

@@ -106,7 +106,7 @@ class ExplainSuite extends ExplainSuiteHelper with DisableAdaptiveExecutionSuite
       keywords = "InMemoryRelation", "StorageLevel(disk, memory, deserialized, 1 replicas)")
   }
 
-  test("optimized plan should show the rewritten aggregate expression") {
+  test("optimized plan should show the rewritten expression") {
     withTempView("test_agg") {
       sql(
         """
@@ -124,6 +124,13 @@ class ExplainSuite extends ExplainSuiteHelper with DisableAdaptiveExecutionSuite
       checkKeywordsExistsInExplain(df,
         "Aggregate [k#x], [k#x, every(v#x) AS every(v)#x, some(v#x) AS some(v)#x, " +
           "any(v#x) AS any(v)#x]")
+    }
+
+    withTable("t") {
+      sql("CREATE TABLE t(col TIMESTAMP) USING parquet")
+      val df = sql("SELECT date_part('month', col) FROM t")
+      checkKeywordsExistsInExplain(df,
+        "Project [month(cast(col#x as date)) AS date_part(month, col)#x]")
     }
   }
 
@@ -243,7 +250,12 @@ class ExplainSuite extends ExplainSuiteHelper with DisableAdaptiveExecutionSuite
     withTable("temptable") {
       val df = sql("create table temptable using parquet as select * from range(2)")
       withNormalizedExplain(df, SimpleMode) { normalizedOutput =>
-        assert("Create\\w*?TableAsSelectCommand".r.findAllMatchIn(normalizedOutput).length == 1)
+        // scalastyle:off
+        // == Physical Plan ==
+        // Execute CreateDataSourceTableAsSelectCommand
+        //   +- CreateDataSourceTableAsSelectCommand `spark_catalog`.`default`.`temptable`, ErrorIfExists, Project [id#5L], [id]
+        // scalastyle:on
+        assert("Create\\w*?TableAsSelectCommand".r.findAllMatchIn(normalizedOutput).length == 2)
       }
     }
   }
@@ -455,27 +467,18 @@ class ExplainSuite extends ExplainSuiteHelper with DisableAdaptiveExecutionSuite
     withTempDir { dir =>
       Seq("parquet", "orc", "csv", "json").foreach { fmt =>
         val basePath = dir.getCanonicalPath + "/" + fmt
-        val pushFilterMaps = Map (
-          "parquet" ->
-            "|PushedFilters: \\[IsNotNull\\(value\\), GreaterThan\\(value,2\\)\\]",
-          "orc" ->
-            "|PushedFilters: \\[IsNotNull\\(value\\), GreaterThan\\(value,2\\)\\]",
-          "csv" ->
-            "|PushedFilters: \\[IsNotNull\\(value\\), GreaterThan\\(value,2\\)\\]",
-          "json" ->
-            "|remove_marker"
-        )
-        val expected_plan_fragment1 =
+
+        val expectedPlanFragment =
           s"""
-             |\\(1\\) BatchScan
+             |\\(1\\) BatchScan $fmt file:$basePath
              |Output \\[2\\]: \\[value#x, id#x\\]
              |DataFilters: \\[isnotnull\\(value#x\\), \\(value#x > 2\\)\\]
              |Format: $fmt
              |Location: InMemoryFileIndex\\([0-9]+ paths\\)\\[.*\\]
              |PartitionFilters: \\[isnotnull\\(id#x\\), \\(id#x > 1\\)\\]
-             ${pushFilterMaps.get(fmt).get}
+             |PushedFilters: \\[IsNotNull\\(value\\), GreaterThan\\(value,2\\)\\]
              |ReadSchema: struct\\<value:int\\>
-             |""".stripMargin.replaceAll("\nremove_marker", "").trim
+             |""".stripMargin.trim
 
         spark.range(10)
           .select(col("id"), col("id").as("value"))
@@ -493,7 +496,7 @@ class ExplainSuite extends ExplainSuiteHelper with DisableAdaptiveExecutionSuite
             .format(fmt)
             .load(basePath).where($"id" > 1 && $"value" > 2)
           val normalizedOutput = getNormalizedExplain(df, FormattedMode)
-          assert(expected_plan_fragment1.r.findAllMatchIn(normalizedOutput).length == 1)
+          assert(expectedPlanFragment.r.findAllMatchIn(normalizedOutput).length == 1)
         }
       }
     }
@@ -519,6 +522,21 @@ class ExplainSuite extends ExplainSuiteHelper with DisableAdaptiveExecutionSuite
       checkKeywordsExistsInExplain(
         sql("CREATE TEMPORARY VIEW test AS SELECT 1"),
         "== Analyzed Logical Plan ==\nCreateViewCommand")
+    }
+  }
+
+  test("SPARK-39112: UnsupportedOperationException if explain cost command using v2 command") {
+    withTempDir { dir =>
+      sql("EXPLAIN COST CREATE DATABASE tmp")
+      sql("EXPLAIN COST DESC DATABASE tmp")
+      sql(s"EXPLAIN COST ALTER DATABASE tmp SET LOCATION '${dir.toURI.toString}'")
+      sql("EXPLAIN COST USE tmp")
+      sql("EXPLAIN COST CREATE TABLE t(c1 int) USING PARQUET")
+      sql("EXPLAIN COST SHOW TABLES")
+      sql("EXPLAIN COST SHOW CREATE TABLE t")
+      sql("EXPLAIN COST SHOW TBLPROPERTIES t")
+      sql("EXPLAIN COST DROP TABLE t")
+      sql("EXPLAIN COST DROP DATABASE tmp")
     }
   }
 }
@@ -577,6 +595,7 @@ class ExplainSuiteAE extends ExplainSuiteHelper with EnableAdaptiveExecutionSuit
         |(16) BroadcastHashJoin
         |Left keys [1]: [k#x]
         |Right keys [1]: [k#x]
+        |Join type: Inner
         |Join condition: None
         |""".stripMargin,
       """
@@ -593,7 +612,7 @@ class ExplainSuiteAE extends ExplainSuiteHelper with EnableAdaptiveExecutionSuit
   }
 
   test("SPARK-35884: Explain should only display one plan before AQE takes effect") {
-    val df = (0 to 10).toDF("id").where(Symbol("id") > 5)
+    val df = (0 to 10).toDF("id").where($"id" > 5)
     val modes = Seq(SimpleMode, ExtendedMode, CostMode, FormattedMode)
     modes.foreach { mode =>
       checkKeywordsExistsInExplain(df, mode, "AdaptiveSparkPlan")
@@ -608,7 +627,7 @@ class ExplainSuiteAE extends ExplainSuiteHelper with EnableAdaptiveExecutionSuit
 
   test("SPARK-35884: Explain formatted with subquery") {
     withTempView("t1", "t2") {
-      spark.range(100).select(Symbol("id") % 10 as "key", Symbol("id") as "value")
+      spark.range(100).select($"id" % 10 as "key", $"id" as "value")
         .createOrReplaceTempView("t1")
       spark.range(10).createOrReplaceTempView("t2")
       val query =
@@ -664,7 +683,7 @@ class ExplainSuiteAE extends ExplainSuiteHelper with EnableAdaptiveExecutionSuit
           assert(normalizedOutput.contains(expectedNoCodegenText))
         }
 
-        val aggDf = df.groupBy('key).agg(max('value))
+        val aggDf = df.groupBy($"key").agg(max($"value"))
         withNormalizedExplain(aggDf, CodegenMode) { normalizedOutput =>
           assert(normalizedOutput.contains(expectedNoCodegenText))
         }

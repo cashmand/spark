@@ -17,12 +17,9 @@
 
 package org.apache.spark.sql.connector.expressions.aggregate;
 
-import java.util.Arrays;
-import java.util.stream.Collectors;
-
 import org.apache.spark.annotation.Evolving;
 import org.apache.spark.sql.connector.expressions.Expression;
-import org.apache.spark.sql.connector.expressions.NamedReference;
+import org.apache.spark.sql.internal.connector.ExpressionWithToString;
 
 /**
  * The general implementation of {@link AggregateFunc}, which contains the upper-cased function
@@ -38,35 +35,29 @@ import org.apache.spark.sql.connector.expressions.NamedReference;
  *  <li><pre>COVAR_POP(input1, input2)</pre> Since 3.3.0</li>
  *  <li><pre>COVAR_SAMP(input1, input2)</pre> Since 3.3.0</li>
  *  <li><pre>CORR(input1, input2)</pre> Since 3.3.0</li>
+ *  <li><pre>REGR_INTERCEPT(input1, input2)</pre> Since 3.4.0</li>
+ *  <li><pre>REGR_R2(input1, input2)</pre> Since 3.4.0</li>
+ *  <li><pre>REGR_SLOPE(input1, input2)</pre> Since 3.4.0</li>
+ *  <li><pre>REGR_SXY(input1, input2)</pre> Since 3.4.0</li>
  * </ol>
  *
  * @since 3.3.0
  */
 @Evolving
-public final class GeneralAggregateFunc implements AggregateFunc {
+public final class GeneralAggregateFunc extends ExpressionWithToString implements AggregateFunc {
   private final String name;
   private final boolean isDistinct;
-  private final NamedReference[] inputs;
+  private final Expression[] children;
+
+  public GeneralAggregateFunc(String name, boolean isDistinct, Expression[] children) {
+    this.name = name;
+    this.isDistinct = isDistinct;
+    this.children = children;
+  }
 
   public String name() { return name; }
   public boolean isDistinct() { return isDistinct; }
-  public NamedReference[] inputs() { return inputs; }
-
-  public GeneralAggregateFunc(String name, boolean isDistinct, NamedReference[] inputs) {
-    this.name = name;
-    this.isDistinct = isDistinct;
-    this.inputs = inputs;
-  }
 
   @Override
-  public String toString() {
-    String inputsString = Arrays.stream(inputs)
-      .map(Expression::describe)
-      .collect(Collectors.joining(", "));
-    if (isDistinct) {
-      return name + "(DISTINCT " + inputsString + ")";
-    } else {
-      return name + "(" + inputsString + ")";
-    }
-  }
+  public Expression[] children() { return children; }
 }

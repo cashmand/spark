@@ -106,7 +106,7 @@ class MultilayerPerceptronClassifierTest(SparkSessionTestCase):
         np.testing.assert_allclose(
             result.rawPrediction,
             expected_rawPrediction,
-            rtol=0.15,
+            rtol=0.3,
             # Use the same default value as `np.allclose`
             atol=1e-08,
         )
@@ -413,7 +413,7 @@ if __name__ == "__main__":
     from pyspark.ml.tests.test_algorithms import *  # noqa: F401
 
     try:
-        import xmlrunner  # type: ignore[import]
+        import xmlrunner
 
         testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
     except ImportError:

@@ -47,10 +47,12 @@ trait AlterTableRenameSuiteBase extends QueryTest with DDLCommandTestUtils {
   }
 
   test("table to rename does not exist") {
-    val errMsg = intercept[AnalysisException] {
+    val e = intercept[AnalysisException] {
       sql(s"ALTER TABLE $catalog.dbx.does_not_exist RENAME TO dbx.tab2")
-    }.getMessage
-    assert(errMsg.contains("Table or view not found"))
+    }
+    checkErrorTableNotFound(e, s"`$catalog`.`dbx`.`does_not_exist`",
+      ExpectedContext(s"$catalog.dbx.does_not_exist", 12,
+        11 + s"$catalog.dbx.does_not_exist".length))
   }
 
   test("omit namespace in the destination table") {
@@ -134,6 +136,14 @@ trait AlterTableRenameSuiteBase extends QueryTest with DDLCommandTestUtils {
       sql(s"insert into table $src partition(j=2) values (1)")
       sql(s"ALTER TABLE $src RENAME TO ns.dst_tbl")
       checkAnswer(spark.table(dst), Row(1, 2))
+    }
+  }
+
+  test("SPARK-38587: use formatted names") {
+    withNamespaceAndTable("CaseUpperCaseLower", "CaseUpperCaseLower") { t =>
+      sql(s"CREATE TABLE ${t}_Old (i int) $defaultUsing")
+      sql(s"ALTER TABLE ${t}_Old RENAME TO CaseUpperCaseLower.CaseUpperCaseLower")
+      assert(spark.table(t).isEmpty)
     }
   }
 }

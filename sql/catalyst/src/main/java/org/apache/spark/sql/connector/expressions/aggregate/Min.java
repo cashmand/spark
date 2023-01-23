@@ -19,6 +19,7 @@ package org.apache.spark.sql.connector.expressions.aggregate;
 
 import org.apache.spark.annotation.Evolving;
 import org.apache.spark.sql.connector.expressions.Expression;
+import org.apache.spark.sql.internal.connector.ExpressionWithToString;
 
 /**
  * An aggregate function that returns the minimum value in a group.
@@ -26,7 +27,7 @@ import org.apache.spark.sql.connector.expressions.Expression;
  * @since 3.2.0
  */
 @Evolving
-public final class Min implements AggregateFunc {
+public final class Min extends ExpressionWithToString implements AggregateFunc {
   private final Expression input;
 
   public Min(Expression column) { this.input = column; }
@@ -34,5 +35,5 @@ public final class Min implements AggregateFunc {
   public Expression column() { return input; }
 
   @Override
-  public String toString() { return "MIN(" + input.describe() + ")"; }
+  public Expression[] children() { return new Expression[]{ input }; }
 }

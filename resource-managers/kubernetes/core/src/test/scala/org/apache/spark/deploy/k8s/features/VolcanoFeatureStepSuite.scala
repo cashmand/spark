@@ -67,13 +67,10 @@ class VolcanoFeatureStepSuite extends SparkFunSuite {
     assert(podGroup.getSpec.getQueue == "driver-queue")
   }
 
-  private def verifyPriority(pod: SparkPod): Unit = {
-    val sparkConf = new SparkConf()
-    val kubernetesConf = KubernetesTestConf.createDriverConf(sparkConf)
+  test("SPARK-38503: return empty for executor pre resource") {
+    val kubernetesConf = KubernetesTestConf.createExecutorConf(new SparkConf())
     val step = new VolcanoFeatureStep()
     step.init(kubernetesConf)
-    val sparkPod = step.configurePod(pod)
-    val podGroup = step.getAdditionalPreKubernetesResources().head.asInstanceOf[PodGroup]
-    assert(podGroup.getSpec.getPriorityClassName === sparkPod.pod.getSpec.getPriorityClassName)
+    assert(step.getAdditionalPreKubernetesResources() === Seq.empty)
   }
 }

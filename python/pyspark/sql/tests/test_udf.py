@@ -24,7 +24,7 @@ import datetime
 
 from pyspark import SparkContext, SQLContext
 from pyspark.sql import SparkSession, Column, Row
-from pyspark.sql.functions import udf, assert_true, lit
+from pyspark.sql.functions import udf, assert_true, lit, rand
 from pyspark.sql.udf import UserDefinedFunction
 from pyspark.sql.types import (
     StringType,
@@ -38,14 +38,14 @@ from pyspark.sql.types import (
     TimestampNTZType,
     DayTimeIntervalType,
 )
-from pyspark.sql.utils import AnalysisException
+from pyspark.errors import AnalysisException
 from pyspark.testing.sqlutils import ReusedSQLTestCase, test_compiled, test_not_compiled_message
 from pyspark.testing.utils import QuietTest
 
 
-class UDFTests(ReusedSQLTestCase):
+class BaseUDFTests(object):
     def test_udf_with_callable(self):
-        d = [Row(number=i, squared=i ** 2) for i in range(10)]
+        d = [Row(number=i, squared=i**2) for i in range(10)]
         rdd = self.sc.parallelize(d)
         data = self.spark.createDataFrame(rdd)
 
@@ -60,7 +60,7 @@ class UDFTests(ReusedSQLTestCase):
         self.assertEqual(res.agg({"plus_four": "sum"}).collect()[0][0], 85)
 
     def test_udf_with_partial_function(self):
-        d = [Row(number=i, squared=i ** 2) for i in range(10)]
+        d = [Row(number=i, squared=i**2) for i in range(10)]
         rdd = self.sc.parallelize(d)
         data = self.spark.createDataFrame(rdd)
 
@@ -258,15 +258,15 @@ class UDFTests(ReusedSQLTestCase):
         def runWithJoinType(join_type, type_string):
             with self.assertRaisesRegex(
                 AnalysisException,
-                "Using PythonUDF in join condition of join type %s is not supported" % type_string,
+                """Python UDF in the ON clause of a %s JOIN.""" % type_string,
             ):
                 left.join(right, [f("a", "b"), left.a1 == right.b1], join_type).collect()
 
-        runWithJoinType("full", "FullOuter")
-        runWithJoinType("left", "LeftOuter")
-        runWithJoinType("right", "RightOuter")
-        runWithJoinType("leftanti", "LeftAnti")
-        runWithJoinType("leftsemi", "LeftSemi")
+        runWithJoinType("full", "FULL OUTER")
+        runWithJoinType("left", "LEFT OUTER")
+        runWithJoinType("right", "RIGHT OUTER")
+        runWithJoinType("leftanti", "LEFT ANTI")
+        runWithJoinType("leftsemi", "LEFT SEMI")
 
     def test_udf_as_join_condition(self):
         left = self.spark.createDataFrame([Row(a=1, a1=1, a2=1), Row(a=2, a1=2, a2=2)])
@@ -681,6 +681,24 @@ class UDFTests(ReusedSQLTestCase):
         finally:
             shutil.rmtree(path)
 
+    # SPARK-42134
+    def test_file_dsv2_with_udf_filter(self):
+        from pyspark.sql.functions import lit
+
+        path = tempfile.mkdtemp()
+        shutil.rmtree(path)
+
+        try:
+            with self.sql_conf({"spark.sql.sources.useV1SourceList": ""}):
+                self.spark.range(1).write.mode("overwrite").format("parquet").save(path)
+                df = self.spark.read.parquet(path).toDF("i")
+                f = udf(lambda x: False, "boolean")(lit(1))
+                result = df.filter(f)
+                self.assertEqual(0, result.count())
+
+        finally:
+            shutil.rmtree(path)
+
     # SPARK-25591
     def test_same_accumulator_in_udfs(self):
         data_schema = StructType(
@@ -796,6 +814,60 @@ class UDFTests(ReusedSQLTestCase):
                     )
         finally:
             shutil.rmtree(path)
+
+    def test_udf_with_rand(self):
+        # SPARK-40121: rand() with Python UDF.
+        self.assertEqual(
+            len(self.spark.range(10).select(udf(lambda x: x, DoubleType())(rand())).collect()), 10
+        )
+
+
+class UDFTests(BaseUDFTests, ReusedSQLTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super(BaseUDFTests, cls).setUpClass()
+        cls.spark.conf.set("spark.sql.execution.pythonUDF.arrow.enabled", "false")
+
+
+def test_use_arrow(self):
+    # useArrow=True
+    row_true = (
+        self.spark.range(1)
+        .selectExpr(
+            "array(1, 2, 3) as array",
+        )
+        .select(
+            udf(lambda x: str(x), useArrow=True)("array"),
+        )
+        .first()
+    )
+    # The input is a NumPy array when the Arrow optimization is on.
+    self.assertEquals(row_true[0], "[1 2 3]")
+
+    # useArrow=None
+    row_none = (
+        self.spark.range(1)
+        .selectExpr(
+            "array(1, 2, 3) as array",
+        )
+        .select(
+            udf(lambda x: str(x), useArrow=None)("array"),
+        )
+        .first()
+    )
+
+    # useArrow=False
+    row_false = (
+        self.spark.range(1)
+        .selectExpr(
+            "array(1, 2, 3) as array",
+        )
+        .select(
+            udf(lambda x: str(x), useArrow=False)("array"),
+        )
+        .first()
+    )
+    self.assertEquals(row_false[0], row_none[0])  # "[1, 2, 3]"
 
 
 class UDFInitializationTests(unittest.TestCase):

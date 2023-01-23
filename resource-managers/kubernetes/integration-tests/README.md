@@ -20,15 +20,14 @@ To run tests with Java 11 instead of Java 8, use `--java-image-tag` to specify t
 To run tests with a custom docker image, use `--docker-file` to specify the Dockerfile.
 Note that if both `--docker-file` and `--java-image-tag` are used, `--docker-file` is preferred,
 and the custom Dockerfile need to include a Java installation by itself.
-Dockerfile.java17 is an example of custom Dockerfile, and you can specify it to run tests with Java 17.
 
-    ./dev/dev-run-integration-tests.sh --docker-file ../docker/src/main/dockerfiles/spark/Dockerfile.java17
+    ./dev/dev-run-integration-tests.sh --docker-file ../docker/src/main/dockerfiles/spark/Dockerfile
 
 To run tests with Hadoop 2.x instead of Hadoop 3.x, use `--hadoop-profile`.
 
     ./dev/dev-run-integration-tests.sh --hadoop-profile hadoop-2
 
-The minimum tested version of Minikube is 1.18.0. The kube-dns addon must be enabled. Minikube should
+The minimum tested version of Minikube is 1.28.0. The kube-dns addon must be enabled. Minikube should
 run with a minimum of 4 CPUs and 6G of memory:
 
     minikube start --cpus 4 --memory 6144
@@ -47,7 +46,7 @@ default this is set to `minikube`, the available backends are their prerequisite
 
 ### `minikube`
 
-Uses the local `minikube` cluster, this requires that `minikube` 1.18.0 or greater be installed and that it be allocated
+Uses the local `minikube` cluster, this requires that `minikube` 1.28.0 or greater be installed and that it be allocated
 at least 4 CPUs and 6GB memory (some users have reported success with as few as 3 CPUs and 4GB memory).  The tests will 
 check if `minikube` is started and abort early if it isn't currently running.
 
@@ -268,6 +267,30 @@ to the wrapper scripts and using the wrapper scripts will simply set these appro
     </td>
     <td></td>
   </tr>
+  <tr>
+    <td><code>spark.kubernetes.test.driverRequestCores</code></td>
+    <td>
+      Set cpu resource for each driver pod in test, this is currently only for test on cpu resource limited cluster,
+      it's not recommended for other scenarios.
+    </td>
+    <td></td>
+  </tr>
+  <tr>
+    <td><code>spark.kubernetes.test.executorRequestCores</code></td>
+    <td>
+      Set cpu resource for each executor pod in test, this is currently only for test on cpu resource limited cluster,
+      it's not recommended for other scenarios.
+    </td>
+    <td></td>
+  </tr>
+  <tr>
+    <td><code>spark.kubernetes.test.volcanoMaxConcurrencyJobNum</code></td>
+    <td>
+      Set maximum number for concurrency jobs, It helps developers setting suitable resources according to test env in
+      volcano test.
+    </td>
+    <td></td>
+  </tr>
 </table>
 
 # Running the Kubernetes Integration Tests with SBT
@@ -308,9 +331,17 @@ You can also specify your specific dockerfile to build JVM/Python/R based image 
 
 # Running the Volcano Integration Tests
 
-Prerequisites
-- Install Volcano according to [link](https://volcano.sh/en/docs/installation/).
+Volcano integration is experimental in Aapche Spark 3.3.0 and the test coverage is limited.
+
+## Requirements
 - A minimum of 6 CPUs and 9G of memory is required to complete all Volcano test cases.
+- Volcano v1.5.1.
+
+## Installation
+
+    kubectl apply -f https://raw.githubusercontent.com/volcano-sh/volcano/v1.7.0/installer/volcano-development.yaml
+
+## Run tests
 
 You can specify `-Pvolcano` to enable volcano module to run all Kubernetes and Volcano tests
 
@@ -326,3 +357,8 @@ You can also specify `volcano` tag to only run Volcano test:
         -Dtest.exclude.tags=minikube \
         -Dspark.kubernetes.test.deployMode=docker-desktop \
         'kubernetes-integration-tests/test'
+
+## Cleanup Volcano
+
+    kubectl delete -f https://raw.githubusercontent.com/volcano-sh/volcano/v1.7.0/installer/volcano-development.yaml
+

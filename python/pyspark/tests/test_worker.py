@@ -70,7 +70,6 @@ class WorkerTests(ReusedPySparkTestCase):
                 try:
                     daemon_pid, worker_pid = map(int, data)
                 except ValueError:
-                    pass
                     # In case the value is not written yet.
                     cnt += 1
                     if cnt == 10:
@@ -264,7 +263,7 @@ if __name__ == "__main__":
     from pyspark.tests.test_worker import *  # noqa: F401
 
     try:
-        import xmlrunner  # type: ignore[import]
+        import xmlrunner
 
         testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
     except ImportError:

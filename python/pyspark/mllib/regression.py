@@ -279,12 +279,10 @@ def _regression_train_wrapper(
         weights, intercept, numFeatures, numClasses = train_func(
             data, _convert_to_vector(initial_weights)
         )
-        return modelClass(  # type: ignore[call-arg, return-value]
-            weights, intercept, numFeatures, numClasses
-        )
+        return modelClass(weights, intercept, numFeatures, numClasses)  # type: ignore[call-arg]
     else:
         weights, intercept = train_func(data, _convert_to_vector(initial_weights))
-        return modelClass(weights, intercept)  # type: ignore[call-arg, return-value]
+        return modelClass(weights, intercept)  # type: ignore[call-arg]
 
 
 class LinearRegressionWithSGD:
@@ -381,9 +379,7 @@ class LinearRegressionWithSGD:
                 float(convergenceTol),
             )
 
-        return _regression_train_wrapper(
-            train, LinearRegressionModel, data, initialWeights  # type: ignore[arg-type]
-        )
+        return _regression_train_wrapper(train, LinearRegressionModel, data, initialWeights)
 
 
 @inherit_doc
@@ -561,9 +557,7 @@ class LassoWithSGD:
                 float(convergenceTol),
             )
 
-        return _regression_train_wrapper(
-            train, LassoModel, data, initialWeights  # type: ignore[arg-type]
-        )
+        return _regression_train_wrapper(train, LassoModel, data, initialWeights)
 
 
 @inherit_doc
@@ -745,9 +739,7 @@ class RidgeRegressionWithSGD:
                 float(convergenceTol),
             )
 
-        return _regression_train_wrapper(
-            train, RidgeRegressionModel, data, initialWeights  # type: ignore[arg-type]
-        )
+        return _regression_train_wrapper(train, RidgeRegressionModel, data, initialWeights)
 
 
 class IsotonicRegressionModel(Saveable, Loader["IsotonicRegressionModel"]):
@@ -844,9 +836,7 @@ class IsotonicRegressionModel(Saveable, Loader["IsotonicRegressionModel"]):
         """
         if isinstance(x, RDD):
             return x.map(lambda v: self.predict(v))
-        return np.interp(
-            x, self.boundaries, self.predictions  # type: ignore[call-overload, arg-type]
-        )
+        return np.interp(x, self.boundaries, self.predictions)  # type: ignore[arg-type]
 
     @since("1.4.0")
     def save(self, sc: SparkContext, path: str) -> None:

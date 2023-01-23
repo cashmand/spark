@@ -92,6 +92,14 @@ class ShuffleSpecSuite extends SparkFunSuite with SQLHelper {
     )
 
     checkCompatible(
+      HashShuffleSpec(HashPartitioning(Seq($"a", $"b"), 10),
+        ClusteredDistribution(Seq($"a", $"b", $"b"))),
+      HashShuffleSpec(HashPartitioning(Seq($"a", $"d"), 10),
+        ClusteredDistribution(Seq($"a", $"c", $"d"))),
+      expected = true
+    )
+
+    checkCompatible(
       HashShuffleSpec(HashPartitioning(Seq($"a", $"b", $"a"), 10),
         ClusteredDistribution(Seq($"a", $"b", $"b"))),
       HashShuffleSpec(HashPartitioning(Seq($"a", $"c", $"a"), 10),
@@ -359,7 +367,7 @@ class ShuffleSpecSuite extends SparkFunSuite with SQLHelper {
       assert(HashShuffleSpec(HashPartitioning(Seq($"a", $"b"), 10), distribution)
         .canCreatePartitioning)
     }
-    assert(SinglePartitionShuffleSpec.canCreatePartitioning)
+    assert(!SinglePartitionShuffleSpec.canCreatePartitioning)
     withSQLConf(SQLConf.REQUIRE_ALL_CLUSTER_KEYS_FOR_CO_PARTITION.key -> "false") {
       assert(ShuffleSpecCollection(Seq(
         HashShuffleSpec(HashPartitioning(Seq($"a"), 10), distribution),

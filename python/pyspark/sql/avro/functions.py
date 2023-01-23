@@ -23,7 +23,7 @@ A collections of builtin avro functions
 from typing import Dict, Optional, TYPE_CHECKING
 from pyspark import SparkContext
 from pyspark.sql.column import Column, _to_java_column
-from pyspark.util import _print_missing_jar  # type: ignore[attr-defined]
+from pyspark.util import _print_missing_jar
 
 if TYPE_CHECKING:
     from pyspark.sql._typing import ColumnOrName
@@ -140,7 +140,7 @@ def _test() -> None:
     import sys
     from pyspark.testing.utils import search_jar
 
-    avro_jar = search_jar("external/avro", "spark-avro", "spark-avro")
+    avro_jar = search_jar("connector/avro", "spark-avro", "spark-avro")
     if avro_jar is None:
         print(
             "Skipping all Avro Python tests as the optional Avro project was "

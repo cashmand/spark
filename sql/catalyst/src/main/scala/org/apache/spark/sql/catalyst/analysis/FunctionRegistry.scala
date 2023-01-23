@@ -23,14 +23,13 @@ import javax.annotation.concurrent.GuardedBy
 import scala.collection.mutable
 import scala.reflect.ClassTag
 
-import org.apache.spark.SparkThrowable
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.FunctionIdentifier
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.catalyst.expressions.xml._
-import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, Range}
+import org.apache.spark.sql.catalyst.plans.logical.{Generate, LogicalPlan, OneRowRelation, Range}
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.types._
@@ -132,11 +131,7 @@ object FunctionRegistryBase {
         } catch {
           // the exception is an invocation exception. To get a meaningful message, we need the
           // cause.
-          case e: Exception =>
-            throw e.getCause match {
-              case ae: SparkThrowable => ae
-              case _ => new AnalysisException(e.getCause.getMessage)
-            }
+          case e: Exception => throw QueryCompilationErrors.funcBuildError(name, e)
         }
       } else {
         // Otherwise, find a constructor method that matches the number of arguments, and use that.
@@ -153,7 +148,7 @@ object FunctionRegistryBase {
         } catch {
           // the exception is an invocation exception. To get a meaningful message, we need the
           // cause.
-          case e: Exception => throw new AnalysisException(e.getCause.getMessage)
+          case e: Exception => throw QueryCompilationErrors.funcBuildError(name, e)
         }
       }
     }
@@ -170,7 +165,7 @@ object FunctionRegistryBase {
     if (df != null) {
       if (df.extended().isEmpty) {
         new ExpressionInfo(
-          clazz.getCanonicalName,
+          clazz.getCanonicalName.stripSuffix("$"),
           null,
           name,
           df.usage(),
@@ -184,10 +179,11 @@ object FunctionRegistryBase {
       } else {
         // This exists for the backward compatibility with old `ExpressionDescription`s defining
         // the extended description in `extended()`.
-        new ExpressionInfo(clazz.getCanonicalName, null, name, df.usage(), df.extended())
+        new ExpressionInfo(
+          clazz.getCanonicalName.stripSuffix("$"), null, name, df.usage(), df.extended())
       }
     } else {
-      new ExpressionInfo(clazz.getCanonicalName, name)
+      new ExpressionInfo(clazz.getCanonicalName.stripSuffix("$"), name)
     }
   }
 }
@@ -231,7 +227,7 @@ trait SimpleFunctionRegistryBase[T] extends FunctionRegistryBase[T] with Logging
   override def lookupFunction(name: FunctionIdentifier, children: Seq[Expression]): T = {
     val func = synchronized {
       functionBuilders.get(normalizeFuncName(name)).map(_._2).getOrElse {
-        throw QueryCompilationErrors.functionUndefinedError(name)
+        throw QueryCompilationErrors.unresolvedRoutineError(name, Seq("system.builtin"))
       }
     }
     func(children)
@@ -452,6 +448,10 @@ object FunctionRegistry {
     expression[TrySubtract]("try_subtract"),
     expression[TryMultiply]("try_multiply"),
     expression[TryElementAt]("try_element_at"),
+    expressionBuilder("try_avg", TryAverageExpressionBuilder, setAlias = true),
+    expressionBuilder("try_sum", TrySumExpressionBuilder, setAlias = true),
+    expression[TryToBinary]("try_to_binary"),
+    expressionBuilder("try_to_timestamp", TryToTimestampExpressionBuilder, setAlias = true),
 
     // aggregate functions
     expression[HyperLogLogPlusPlus]("approx_count_distinct"),
@@ -463,6 +463,7 @@ object FunctionRegistry {
     expression[CovSample]("covar_samp"),
     expression[First]("first"),
     expression[First]("first_value", true),
+    expression[AnyValue]("any_value"),
     expression[Kurtosis]("kurtosis"),
     expression[Last]("last"),
     expression[Last]("last_value", true),
@@ -472,6 +473,7 @@ object FunctionRegistry {
     expression[Min]("min"),
     expression[MinBy]("min_by"),
     expression[Percentile]("percentile"),
+    expression[Median]("median"),
     expression[Skewness]("skewness"),
     expression[ApproximatePercentile]("percentile_approx"),
     expression[ApproximatePercentile]("approx_percentile", true),
@@ -485,7 +487,7 @@ object FunctionRegistry {
     expression[VariancePop]("var_pop"),
     expression[VarianceSamp]("var_samp"),
     expression[CollectList]("collect_list"),
-    expression[CollectList]("array_agg", true),
+    expression[CollectList]("array_agg", true, Some("3.3.0")),
     expression[CollectSet]("collect_set"),
     expression[CountMinSketchAgg]("count_min_sketch"),
     expression[BoolAnd]("every", true),
@@ -496,6 +498,13 @@ object FunctionRegistry {
     expression[RegrCount]("regr_count"),
     expression[RegrAvgX]("regr_avgx"),
     expression[RegrAvgY]("regr_avgy"),
+    expression[RegrR2]("regr_r2"),
+    expression[RegrSXX]("regr_sxx"),
+    expression[RegrSXY]("regr_sxy"),
+    expression[RegrSYY]("regr_syy"),
+    expression[RegrSlope]("regr_slope"),
+    expression[RegrIntercept]("regr_intercept"),
+    expression[Mode]("mode"),
 
     // string functions
     expression[Ascii]("ascii"),
@@ -516,11 +525,14 @@ object FunctionRegistry {
     expression[FormatNumber]("format_number"),
     expression[FormatString]("format_string"),
     expression[ToNumber]("to_number"),
+    expression[TryToNumber]("try_to_number"),
+    expression[ToCharacter]("to_char"),
     expression[GetJsonObject]("get_json_object"),
     expression[InitCap]("initcap"),
     expression[StringInstr]("instr"),
     expression[Lower]("lcase", true),
     expression[Length]("length"),
+    expression[Length]("len", setAlias = true, Some("3.4.0")),
     expression[Levenshtein]("levenshtein"),
     expression[Like]("like"),
     expression[ILike]("ilike"),
@@ -530,7 +542,6 @@ object FunctionRegistry {
     expressionBuilder("lpad", LPadExpressionBuilder),
     expression[StringTrimLeft]("ltrim"),
     expression[JsonTuple]("json_tuple"),
-    expression[ParseUrl]("parse_url"),
     expression[StringLocate]("position", true),
     expression[FormatString]("printf", true),
     expression[RegExpExtract]("regexp_extract"),
@@ -548,6 +559,7 @@ object FunctionRegistry {
     expression[SoundEx]("soundex"),
     expression[StringSpace]("space"),
     expression[StringSplit]("split"),
+    expression[SplitPart]("split_part"),
     expression[Substring]("substr", true),
     expression[Substring]("substring"),
     expression[Left]("left"),
@@ -569,15 +581,26 @@ object FunctionRegistry {
     expression[XPathLong]("xpath_long"),
     expression[XPathShort]("xpath_short"),
     expression[XPathString]("xpath_string"),
+    expression[RegExpCount]("regexp_count"),
+    expression[RegExpSubStr]("regexp_substr"),
+    expression[RegExpInStr]("regexp_instr"),
+
+    // url functions
+    expression[UrlEncode]("url_encode"),
+    expression[UrlDecode]("url_decode"),
+    expression[ParseUrl]("parse_url"),
 
     // datetime functions
     expression[AddMonths]("add_months"),
     expression[CurrentDate]("current_date"),
+    expressionBuilder("curdate", CurDateExpressionBuilder, setAlias = true),
     expression[CurrentTimestamp]("current_timestamp"),
     expression[CurrentTimeZone]("current_timezone"),
     expression[LocalTimestamp]("localtimestamp"),
     expression[DateDiff]("datediff"),
+    expression[DateDiff]("date_diff", setAlias = true, Some("3.4.0")),
     expression[DateAdd]("date_add"),
+    expression[DateAdd]("dateadd", setAlias = true, Some("3.4.0")),
     expression[DateFormatClass]("date_format"),
     expression[DateSub]("date_sub"),
     expression[DayOfMonth]("day", true),
@@ -611,6 +634,7 @@ object FunctionRegistry {
     expression[Year]("year"),
     expression[TimeWindow]("window"),
     expression[SessionWindow]("session_window"),
+    expression[WindowTime]("window_time"),
     expression[MakeDate]("make_date"),
     expression[MakeTimestamp]("make_timestamp"),
     // We keep the 2 expression builders below to have different function docs.
@@ -622,6 +646,7 @@ object FunctionRegistry {
     expression[Extract]("extract"),
     // We keep the `DatePartExpressionBuilder` to have different function docs.
     expressionBuilder("date_part", DatePartExpressionBuilder, setAlias = true),
+    expressionBuilder("datepart", DatePartExpressionBuilder, setAlias = true, Some("3.4.0")),
     expression[DateFromUnixDate]("date_from_unix_date"),
     expression[UnixDate]("unix_date"),
     expression[SecondsToTimestamp]("timestamp_seconds"),
@@ -643,6 +668,7 @@ object FunctionRegistry {
     expression[ArraySort]("array_sort"),
     expression[ArrayExcept]("array_except"),
     expression[ArrayUnion]("array_union"),
+    expression[ArrayCompact]("array_compact"),
     expression[CreateMap]("map"),
     expression[CreateNamedStruct]("named_struct"),
     expression[ElementAt]("element_at"),
@@ -661,6 +687,7 @@ object FunctionRegistry {
     expression[Shuffle]("shuffle"),
     expression[ArrayMin]("array_min"),
     expression[ArrayMax]("array_max"),
+    expression[ArrayAppend]("array_append"),
     expression[Reverse]("reverse"),
     expression[Concat]("concat"),
     expression[Flatten]("flatten"),
@@ -674,10 +701,12 @@ object FunctionRegistry {
     expression[ArrayExists]("exists"),
     expression[ArrayForAll]("forall"),
     expression[ArrayAggregate]("aggregate"),
+    expression[ArrayAggregate]("reduce", setAlias = true, Some("3.4.0")),
     expression[TransformValues]("transform_values"),
     expression[TransformKeys]("transform_keys"),
     expression[MapZipWith]("map_zip_with"),
     expression[ZipWith]("zip_with"),
+    expression[Get]("get"),
 
     CreateStruct.registryEntry,
 
@@ -700,12 +729,15 @@ object FunctionRegistry {
     expression[InputFileBlockLength]("input_file_block_length"),
     expression[MonotonicallyIncreasingID]("monotonically_increasing_id"),
     expression[CurrentDatabase]("current_database"),
+    expression[CurrentDatabase]("current_schema", true),
     expression[CurrentCatalog]("current_catalog"),
     expression[CurrentUser]("current_user"),
+    expression[CurrentUser]("user", setAlias = true),
     expression[CallMethodViaReflection]("reflect"),
     expression[CallMethodViaReflection]("java_method", true),
     expression[SparkVersion]("version"),
     expression[TypeOf]("typeof"),
+    expression[EqualNull]("equal_null"),
 
     // grouping sets
     expression[Grouping]("grouping"),
@@ -772,6 +804,9 @@ object FunctionRegistry {
     castAlias("timestamp", TimestampType),
     castAlias("binary", BinaryType),
     castAlias("string", StringType),
+
+    // mask functions
+    expression[Mask]("mask"),
 
     // csv
     expression[CsvToStructs]("from_csv"),
@@ -845,8 +880,9 @@ object FunctionRegistry {
   private def expressionBuilder[T <: ExpressionBuilder : ClassTag](
       name: String,
       builder: T,
-      setAlias: Boolean = false): (String, (ExpressionInfo, FunctionBuilder)) = {
-    val info = FunctionRegistryBase.expressionInfo[T](name, None)
+      setAlias: Boolean = false,
+      since: Option[String] = None): (String, (ExpressionInfo, FunctionBuilder)) = {
+    val info = FunctionRegistryBase.expressionInfo[T](name, since)
     val funcBuilder = (expressions: Seq[Expression]) => {
       assert(expressions.forall(_.resolved), "function arguments must be resolved.")
       val expr = builder.build(name, expressions)
@@ -866,8 +902,9 @@ object FunctionRegistry {
       name: String,
       dataType: DataType): (String, (ExpressionInfo, FunctionBuilder)) = {
     val builder = (args: Seq[Expression]) => {
-      if (args.size != 1) {
-        throw QueryCompilationErrors.functionAcceptsOnlyOneArgumentError(name)
+      val argSize = args.size
+      if (argSize != 1) {
+        throw QueryCompilationErrors.invalidFunctionArgumentsError(name, "1", argSize)
       }
       Cast(args.head, dataType)
     }
@@ -923,21 +960,30 @@ object TableFunctionRegistry {
   private def logicalPlan[T <: LogicalPlan : ClassTag](name: String)
       : (String, (ExpressionInfo, TableFunctionBuilder)) = {
     val (info, builder) = FunctionRegistryBase.build[T](name, since = None)
+    (name, (info, (expressions: Seq[Expression]) => builder(expressions)))
+  }
+
+  def generator[T <: Generator : ClassTag](name: String, outer: Boolean = false)
+      : (String, (ExpressionInfo, TableFunctionBuilder)) = {
+    val (info, builder) = FunctionRegistryBase.build[T](name, since = None)
     val newBuilder = (expressions: Seq[Expression]) => {
-      try {
-        builder(expressions)
-      } catch {
-        case e: AnalysisException =>
-          val argTypes = expressions.map(_.dataType.typeName).mkString(", ")
-          throw QueryCompilationErrors.cannotApplyTableValuedFunctionError(
-            name, argTypes, info.getUsage, e.getMessage)
-      }
+      val generator = builder(expressions)
+      assert(generator.isInstanceOf[Generator])
+      Generate(
+        generator,
+        unrequiredChildIndex = Nil,
+        outer = outer,
+        qualifier = None,
+        generatorOutput = Nil,
+        child = OneRowRelation())
     }
     (name, (info, newBuilder))
   }
 
   val logicalPlans: Map[String, (ExpressionInfo, TableFunctionBuilder)] = Map(
-    logicalPlan[Range]("range")
+    logicalPlan[Range]("range"),
+    generator[Explode]("explode"),
+    generator[Explode]("explode_outer", outer = true)
   )
 
   val builtin: SimpleTableFunctionRegistry = {
